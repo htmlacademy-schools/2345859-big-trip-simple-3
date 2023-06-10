@@ -1,16 +1,12 @@
-import { render } from '../framework/render';
-import TripPointsModel from '../model/trip-points-model';
-import OffersModel from '../model/offers-model';
-import DestinationsModel from '../model/destinations-model';
+import { render, remove } from '../framework/render';
 import EmptyBoardView from '../view/empty-board-view';
 import TripPointPresenter from './trip-point-presenter';
-import { FilterType, tripPointSortType, UserAction, UpdateType } from '../moks/const';
+import { FilterType, tripPointSortType, UserAction, UpdateType, EventFormViewMode } from '../moks/const';
 import dayjs from 'dayjs';
 import FilterView from '../view/filter-view';
 import SortView from '../view/sort-view';
-
-const filters = ['future', 'everything'];
-const sortTypes = ['day', 'event', 'time', 'price', 'offer'];
+import EventFormView from '../view/event-form-view';
+import UiBlocker from '../framework/ui-blocker/ui-blocker';
 
 export default class BoardPresenter {
 
@@ -22,11 +18,15 @@ export default class BoardPresenter {
 
   #sortView = null;
   #filterView = null;
+  #createEventForm = null;
 
   #currentSortType = tripPointSortType.DAY;
   #currentFilterType = FilterType.EVERYTHING;
 
   #tripPointPresenters = new Map();
+  #initCounter = 0;
+  #isLoading = false;
+  #uiBlocker = new UiBlocker(350, 1500);
 
   static get offersModel() {
     return this.#offersModel;
@@ -36,8 +36,17 @@ export default class BoardPresenter {
     return this.#destinationsModel;
   }
 
-  constructor({tripPointsContainer}) {
+  constructor({tripPointsModel, offersModel, destinationsModel, tripPointsContainer}) {
     this.#tripPointsContainer = tripPointsContainer;
+
+    BoardPresenter.#tripPointsModel = tripPointsModel;
+    BoardPresenter.#destinationsModel = destinationsModel;
+    BoardPresenter.#offersModel = offersModel;
+
+    BoardPresenter.#tripPointsModel.addObserver(this.#handleModelEvent);
+    BoardPresenter.#offersModel.addObserver(this.#handleModelEvent);
+    BoardPresenter.#destinationsModel.addObserver(this.#handleModelEvent);
+
   }
 
   static #sortPointsByDay = (a ,b) => {
@@ -80,36 +89,75 @@ export default class BoardPresenter {
     return BoardPresenter.#tripPointsModel.tripPoints;
   }
 
+  get isLoading() {
+    return this.#isLoading;
+  }
+
+  set isLoading(value) {
+    const prevValue = this.#isLoading;
+    this.#isLoading = value;
+    if(!prevValue && this.isLoading) {
+      this.#uiBlocker.block();
+    } else if (!this.isLoading) {
+      this.#uiBlocker.unblock();
+    }
+  }
+
   init = () => {
 
-    BoardPresenter.#tripPointsModel = new TripPointsModel();
-    BoardPresenter.#offersModel = new OffersModel();
-    BoardPresenter.#destinationsModel = new DestinationsModel();
+    this.isLoading = true;
 
-    BoardPresenter.#tripPointsModel.addObserver(this.#handleModelEvent);
-
-    this.#sortView = new SortView(sortTypes);
-    this.#filterView = new FilterView(filters);
+    this.#filterView = new FilterView({
+      onFilterClick: this.#onFilterClick
+    });
+    this.#sortView = new SortView();
 
     this.#renderFilter();
     this.#renderSort();
 
-    this.#renderPoints();
+    Promise.all([
+      BoardPresenter.#tripPointsModel.init(),
+      BoardPresenter.#offersModel.init(),
+      BoardPresenter.#destinationsModel.init()
+    ]).then(() => {
+      document.querySelector('.trip-main__event-add-btn').addEventListener('click', this.#onNewEventButtonClick);
+    });
 
   };
 
-  #handleViewAction = (actionType, updateType, update) => {
+  #onFilterClick = (filterType) => {
+    this.#currentFilterType = filterType;
+    this.#handleModelEvent(UpdateType.MINOR);
+  };
+
+  #handleViewAction = async (actionType, updateType, update) => {
     switch (actionType) {
-      case UserAction.ADD_POINT:
-        BoardPresenter.#tripPointsModel.addTripPoint(updateType, update);
-        break;
       case UserAction.UPDATE_POINT:
-        BoardPresenter.#tripPointsModel.updateTripPoint(updateType, update);
+        this.#tripPointPresenters.get(update.id).setSaving();
+        try {
+          await BoardPresenter.#tripPointsModel.updateTripPoint(updateType, update);
+        } catch (err) {
+          this.#tripPointPresenters.get(update.id).setAborting();
+        }
+        break;
+      case UserAction.ADD_POINT:
+        this.#createEventForm.setSaving();
+        try {
+          await BoardPresenter.#tripPointsModel.addTripPoint(updateType, update);
+        } catch(err) {
+          this.#createEventForm.setAborting();
+        }
         break;
       case UserAction.DELETE_POINT:
-        throw new Error('Can not delete a point yet');
-        //BoardPresenter.#tripPointsModel.deleteTripPoint(updateType, update);
-        //break;
+        this.#tripPointPresenters.get(update.id).setDeleting();
+        try {
+          await BoardPresenter.#tripPointsModel.deleteTripPoint(updateType, update);
+        } catch (err) {
+          this.#tripPointPresenters.get(update.id).setAborting();
+        }
+        break;
+      default:
+        new Error('Unknown user action ', actionType);
     }
   };
 
@@ -119,15 +167,62 @@ export default class BoardPresenter {
         this.#tripPointPresenters.get(data.id).init(data);
         break;
       case UpdateType.MINOR:
-        this.#removePoints();
+        this.#clearBoard();
         this.#renderPoints();
         break;
       case UpdateType.MAJOR:
-        this.#removePoints(true);
+        this.#clearBoard(true);
         this.#renderPoints();
+        break;
+      case UpdateType.INIT:
+        this.#initCounter ++;
+        if (this.#initCounter >= 3) {
+          this.#isLoading = false;
+          this.#uiBlocker.unblock();
+          this.#renderPoints();
+        }
         break;
       default:
         throw new Error('Unknown update type used');
+    }
+  };
+
+  #onNewEventButtonClick = (evt) => {
+    evt.preventDefault();
+    this.#closeAllForms();
+    this.#createEventForm = new EventFormView(
+      EventFormViewMode.CREATE,
+      null,
+      BoardPresenter.#offersModel.offersByType,
+      BoardPresenter.#destinationsModel.destinations
+    );
+    this.#createEventForm.setOnFormSubmit(this.#handleViewAction);
+    this.#createEventForm.setOnFormCancel(this.#onCreateFormCancel);
+    document.body.addEventListener('keydown', this.#onCreateFormKeyDown);
+    render(this.#createEventForm, this.#tripPointsContainer, 'afterbegin');
+  };
+
+  #closeAllForms = () => {
+    for(const pres of this.#tripPointPresenters.values()) {
+      pres.switchViewToItem();
+    }
+    this.#cancelEventForm();
+  };
+
+  #cancelEventForm = () => {
+    this.#createEventForm?.cancel();
+    this.#createEventForm = null;
+    document.body.removeEventListener('keydown', this.#onCreateFormKeyDown);
+  };
+
+  #onCreateFormCancel = () => {
+    this.#cancelEventForm();
+  };
+
+  #onCreateFormKeyDown = (evt) => {
+    if(evt.key === 'Escape') {
+      evt.preventDefault();
+      this.#cancelEventForm();
     }
   };
 
@@ -141,7 +236,7 @@ export default class BoardPresenter {
       return;
     }
     this.#currentSortType = sortType;
-    this.#removePoints();
+    this.#clearBoard();
     this.#renderPoints();
   };
 
@@ -149,14 +244,16 @@ export default class BoardPresenter {
     render(this.#filterView, document.querySelector('.trip-controls__filters'));
   };
 
-  #removePoints = (resetSortType) => {
+  #clearBoard = (resetSortType) => {
     for(const pres of this.#tripPointPresenters.values()) {
       pres.removePoint();
     }
     this.#tripPointPresenters.clear();
+    remove(this.#createEventForm);
+    this.#createEventForm = null;
 
     if (resetSortType) {
-      this.#currentSortType = tripPointSortType.DAY;
+      this.#currentSortType = resetSortType;
     }
   };
 
@@ -169,25 +266,19 @@ export default class BoardPresenter {
 
     for (const tripPoint of tripPoints) {
       const tripPointPresenter = new TripPointPresenter(
-        tripPoint,
         this.#tripPointsContainer,
         {
-          onDataChange: this.#handleViewAction
+          onDataChange: this.#handleViewAction,
+          onTripPointClick: () => {
+            this.#closeAllForms();
+            tripPointPresenter.switchViewToForm();
+          }
         }
       );
 
       this.#tripPointPresenters.set(tripPoint.id, tripPointPresenter);
 
-      tripPointPresenter.init({
-        onTripPointClick: () => {
-          tripPointPresenter.switchViewToForm();
-          for (const pres of this.#tripPointPresenters.values()) {
-            if(pres !== tripPointPresenter) {
-              pres.switchViewToItem();
-            }
-          }
-        }
-      });
+      tripPointPresenter.init(tripPoint);
     }
   };
 

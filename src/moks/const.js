@@ -1,21 +1,8 @@
 const EVENT_TYPES = ['taxi', 'bus', 'train', 'ship', 'drive', 'flight', 'check-in', 'sightseeing', 'restaurant'];
 
-const FILTER_HEADERS = {
-  'future': 'Future',
-  'everything': 'Everything'
-};
-
 const FilterType = {
   FUTURE: 'FUTURE',
   EVERYTHING: 'EVERYTHING'
-};
-
-const SORT_HEADERS = {
-  'day': 'Day',
-  'event': 'Event',
-  'time': 'Time',
-  'price': 'Price',
-  'offer': 'Offers'
 };
 
 const tripPointSortType = {
@@ -32,7 +19,13 @@ const UserAction = {
 const UpdateType = {
   PATCH: 'PATCH',
   MINOR: 'MINOR',
-  MAJOR: 'MAJOR'
+  MAJOR: 'MAJOR',
+  INIT: 'INIT'
 };
 
-export {EVENT_TYPES, FILTER_HEADERS, SORT_HEADERS, tripPointSortType, FilterType, UpdateType, UserAction};
+const EventFormViewMode = {
+  CREATE: 'CREATE',
+  EDIT: 'EDIT'
+};
+
+export {EVENT_TYPES, tripPointSortType, FilterType, UpdateType, UserAction, EventFormViewMode};
